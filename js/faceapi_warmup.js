@@ -15,29 +15,28 @@
  * intend to maintain / extend the code consider wrapping it inside an IIFE or
  * converting it to an ES Module to avoid polluting the global scope.
  */
-var videoId = "video";
+var videoId = "video"; // ID of the HTML video element showing the camera stream
 /**
  * ID of the hidden canvas used for capturing raw video frames for inference.
  * @type {string}
  */
-var canvasId = "canvas";
-var canvasId2 = "canvas2";
-var canvasId3 = "canvas3";
+var canvasId = "canvas"; // ID of the hidden canvas for sending frames to the worker
+var canvasId2 = "canvas2"; // ID of the overlay canvas for drawing facial landmarks
+var canvasId3 = "canvas3"; // ID of the overlay canvas for drawing face bounding boxes
 /**
  * ID of the snapshot canvas used to display the detected face image with confidence percentage.
  * @type {string}
  */
-var canvasOutputId = "canvas_output";
-var step_fps = 125 ; // 1000 / 125 = 8 FPS
-var vle_face_landmark_position_yn = "y" ; // y / n
-var vle_facebox_yn = "y" ; // y / n
+var canvasOutputId = "canvas_output"; // ID of the snapshot canvas for captured images
+var step_fps = 125 ; // frame rate step: 1000ms / 125 ≈ 8 FPS
+var vle_face_landmark_position_yn = "y" ; // 'y' to draw landmark positions, 'n' to skip
+var vle_facebox_yn = "y" ; // 'y' to draw bounding boxes, 'n' to skip
 
-
-var isWorkerReady = false;
-var worker = "";
-var serviceWorkerFileName = "faceDetectionServiceWorker.js";
-var serviceWorkerFilePath = "./js/faceDetectionServiceWorker.js";
-var imgFaceFilePathForWarmup = "./models/face_for_loading.png";
+var isWorkerReady = false; // tracks if the service worker and models are ready
+var worker = ""; // will hold the Service Worker instance
+var serviceWorkerFileName = "faceDetectionServiceWorker.js"; // service worker script filename
+var serviceWorkerFilePath = "./js/faceDetectionServiceWorker.js"; // path to the service worker file
+var imgFaceFilePathForWarmup = "./models/face_for_loading.png"; // local image path to warm up models
 
 if(typeof face_detector_options_setup === "undefined" || face_detector_options_setup === "undefined"){
 	var face_detector_options_setup = {
