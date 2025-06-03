@@ -3,63 +3,24 @@
 	<head>
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
-		<title>Register Face</title>
+		<title>Face Detection</title>
+		<link rel="manifest" href="manifest.json">
+		<meta name="theme-color" content="#4CAF50">
+		<meta name="apple-mobile-web-app-capable" content="yes">
+		<meta name="apple-mobile-web-app-status-bar-style" content="black">
+		<link rel="apple-touch-icon" href="icons/icon-192.png">
 		<style>
-			/* Minimal mobile-first styling for face registration */
-			body {
-				display: flex;
-				flex-direction: column;
-				align-items: center;
-				justify-content: center;
-				margin: 0;
-				font-family: Arial, sans-serif;
-				padding: 16px;
-				background: #fff;
-			}
-			main {
-				width: 100%;
-				max-width: 480px;
-			}
-			h1 {
-				text-align: center;
-				margin-bottom: 16px;
-			}
-			video {
-				width: 100%;
-				aspect-ratio: 4/3;
-				border-radius: 4px;
-				margin-bottom: 16px;
-				background: #000;
-			}
-			.form-group {
-				display: flex;
-				flex-direction: column;
-				gap: 8px;
-				margin-bottom: 16px;
-			}
-			input, button {
-				width: 100%;
-				padding: 12px;
-				font-size: 1rem;
-				border: 1px solid #ccc;
-				border-radius: 4px;
-			}
-			button {
-				background-color: #4CAF50;
-				color: #fff;
-				border: none;
-				cursor: pointer;
-			}
-			button:disabled {
-				background-color: #ccc;
-				cursor: default;
-			}
-			#registrationMessage {
-				text-align: center;
-				font-size: 1rem;
-				color: #f00;
-				min-height: 1.2em;
-			}
+			*{margin:0;padding:0;box-sizing:border-box}
+			body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;padding:1rem;background:#f4f4f9;color:#333;}
+			h1{font-size:2rem;margin-bottom:1rem;}
+			.face-detection-container{display:flex;flex-wrap:wrap;gap:1rem;justify-content:center;align-items:center;width:100%;max-width:768px;}
+			.video-wrapper{position:relative;width:100%;}
+			video{border-radius:8px;transform:scaleX(-1);max-width:100%;height:auto;object-fit:contain;}
+			.overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;}
+			.snapshot{border:2px solid #333;background:rgba(255,255,255,0.7);box-shadow:0 4px 10px rgba(0,0,0,0.1);display:none;max-width:100%;height:auto;}
+			label{margin:0.5rem;}
+			#registrationMessage{margin-top:0.5rem;color:red;}
+			@media (max-width:600px){.face-detection-container{flex-direction:column}}
 		</style>
 		
 		<!-- Load face-api core library first -->
@@ -73,26 +34,39 @@
 		</script>
 	</head>
 	<body>
-		<main>
-			<h1>Register Face</h1>
-			<video id="video" autoplay playsinline muted></video>
-			<div class="form-group">
-				<input id="userIdInput" type="text" placeholder="User ID">
-				<input id="userNameInput" type="text" placeholder="Name">
-				<button id="registerButton">Register</button>
-			</div>
-			<div id="registrationMessage"></div>
-		</main>
-		
+		<h1>Face Detection</h1>
+		<a href="#" onclick="urlReplace('index.html')">Go to Index</a><br>
+		<!-- Add user ID and name inputs -->
+		<label>User ID: <input type="text" id="userIdInput" placeholder="Enter user ID"></label>
+		<label>User Name: <input type="text" id="userNameInput" placeholder="Enter user name"></label><br>
+		<div id="registrationMessage" style="color:red; margin-top:10px;"></div>
 		<script>
-			function getParam(name){const p=new URLSearchParams(window.location.search);return p.get(name);} 
-			document.addEventListener('DOMContentLoaded',()=>{
-				document.getElementById('userIdInput').value=getParam('userid')||'test001';
-				document.getElementById('userNameInput').value=getParam('username')||'test';
-				document.getElementById('registerButton').addEventListener('click',video_face_detection);
+			function getParam(name) {
+				const params = new URLSearchParams(window.location.search);
+				return params.get(name);
+			}
+			document.addEventListener('DOMContentLoaded', () => {
+				const defId = getParam('userid') || 'test001';
+				const defName = getParam('username') || 'test';
+				document.getElementById('userIdInput').value = defId;
+				document.getElementById('userNameInput').value = defName;
 			});
 		</script>
 		
+		<div class="face-detection-container"  style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;">
+			<div class="video-wrapper">
+				<video id="video" width="640" height="480" autoplay playsinline muted></video>
+				<!-- Hidden canvas for inference: captures each video frame to send to the worker for face detection -->
+				<canvas id="canvas" class="overlay"></canvas>
+				<!-- Overlay canvas for drawing facial landmarks on top of the video -->
+				<canvas id="canvas2" class="overlay"></canvas>
+				<!-- Overlay canvas for drawing face bounding boxes and confidence scores -->
+				<canvas id="canvas3" class="overlay"></canvas>
+			</div>
+			<!-- Snapshot canvas: displays the captured face image along with the confidence percentage -->
+			<canvas id="canvas_output" class="snapshot"></canvas>
+		</div>
+
 		<script>
 			/**
 			 * ================================
