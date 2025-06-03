@@ -67,8 +67,9 @@
 		</div>
 		<video id="video" autoplay playsinline muted></video>
 		<script>
-			// Set registration mode
+			// Set registration mode and warmup callbacks
 			var faceapi_action = "register";
+			var warmup_completed = [camera_start, video_face_detection];
 			// Configure detection options
 			var face_detector_options_setup = {
 				inputSize: 128,
@@ -104,6 +105,8 @@
 				document.getElementById('userIdInput').value = getParam('userid');
 				document.getElementById('userNameInput').value = getParam('username');
 				updateProgress();
+				// Start camera preview immediately
+				camera_start();
 			});
 		</script>
 	</body>
