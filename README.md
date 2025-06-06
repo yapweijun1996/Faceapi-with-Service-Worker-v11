@@ -19,6 +19,11 @@ A simple, privacy-first face detection and recognition demo using [face-api.js](
 
 [**Try it here**](https://yapweijun1996.github.io/Faceapi-with-Service-Worker-v11/)
 
+## Preview
+
+![image](https://github.com/user-attachments/assets/276c71ce-816c-4893-8ca5-3d7352a3c771)
+
+
 ---
 
 ## 🛠️ Usage
