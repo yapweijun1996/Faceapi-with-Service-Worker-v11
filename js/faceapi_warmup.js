@@ -15,28 +15,29 @@
  * intend to maintain / extend the code consider wrapping it inside an IIFE or
  * converting it to an ES Module to avoid polluting the global scope.
  */
-var videoId = "video"; // ID of the HTML video element showing the camera stream
+var videoId = "video";
 /**
  * ID of the hidden canvas used for capturing raw video frames for inference.
  * @type {string}
  */
-var canvasId = "canvas"; // ID of the hidden canvas for sending frames to the worker
-var canvasId2 = "canvas2"; // ID of the overlay canvas for drawing facial landmarks
-var canvasId3 = "canvas3"; // ID of the overlay canvas for drawing face bounding boxes
+var canvasId = "canvas";
+var canvasId2 = "canvas2";
+var canvasId3 = "canvas3";
 /**
  * ID of the snapshot canvas used to display the detected face image with confidence percentage.
  * @type {string}
  */
-var canvasOutputId = "canvas_output"; // ID of the snapshot canvas for captured images
-var step_fps = 125 ; // frame rate step: 1000ms / 125 ≈ 8 FPS
-var vle_face_landmark_position_yn = "y" ; // 'y' to draw landmark positions, 'n' to skip
-var vle_facebox_yn = "y" ; // 'y' to draw bounding boxes, 'n' to skip
+var canvasOutputId = "canvas_output";
+var step_fps = 16.67 ; // 1000 / 16.67 = 60 FPS
+var vle_face_landmark_position_yn = "y" ; // y / n
+var vle_facebox_yn = "y" ; // y / n
 
-var isWorkerReady = false; // tracks if the service worker and models are ready
-var worker = ""; // will hold the Service Worker instance
-var serviceWorkerFileName = "faceDetectionServiceWorker.js"; // service worker script filename
-var serviceWorkerFilePath = "./js/faceDetectionServiceWorker.js"; // path to the service worker file
-var imgFaceFilePathForWarmup = "./models/face_for_loading.png"; // local image path to warm up models
+
+var isWorkerReady = false;
+var worker = "";
+var serviceWorkerFileName = "faceDetectionServiceWorker.js";
+var serviceWorkerFilePath = "./js/faceDetectionServiceWorker.js";
+var imgFaceFilePathForWarmup = "./models/face_for_loading.png";
 
 if(typeof face_detector_options_setup === "undefined" || face_detector_options_setup === "undefined"){
 	var face_detector_options_setup = {
@@ -59,23 +60,178 @@ var flatRegisteredUserMeta = [];
 // Flag to allow multiple face detection ("y" = allow multiple, else single)
 var multiple_face_detection_yn = "y";
 
+async function openProgressDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('FaceRegProgressDB', 1);
+        request.onupgradeneeded = e => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('progress')) {
+                db.createObjectStore('progress', { keyPath: 'id' });
+            }
+        };
+        request.onsuccess = e => resolve(e.target.result);
+        request.onerror = e => reject(e.target.error);
+    });
+}
+
+function saveProgress() {
+    const data = {
+        id: currentUserId,
+        name: currentUserName,
+        descriptors: currentUserDescriptors.map(d => Array.from(d)),
+        frames: capturedFrames
+    };
+    openProgressDB().then(db => {
+        const tx = db.transaction('progress', 'readwrite');
+        tx.objectStore('progress').put({ id: 'current', data });
+    }).catch(e => console.warn('Failed to save progress', e));
+}
+
+function loadProgress() {
+    openProgressDB().then(db => {
+        const tx = db.transaction('progress', 'readonly');
+        const req = tx.objectStore('progress').get('current');
+        req.onsuccess = () => {
+            const record = req.result;
+            if (!record || !record.data || !Array.isArray(record.data.descriptors)) return;
+            const data = record.data;
+            currentUserId = data.id || '';
+            currentUserName = data.name || '';
+            currentUserDescriptors = data.descriptors.map(arr => new Float32Array(arr));
+            capturedFrames = Array.isArray(data.frames) ? data.frames : [];
+            const idInput = document.getElementById('userIdInput');
+            const nameInput = document.getElementById('userNameInput');
+            if (idInput) idInput.value = currentUserId;
+            if (nameInput) nameInput.value = currentUserName;
+            capturedFrames.forEach(url => addCapturePreview(url));
+            updateProgress();
+        };
+    }).catch(e => console.warn('Failed to load progress', e));
+}
+
+function clearProgress() {
+    openProgressDB().then(db => {
+        const tx = db.transaction('progress', 'readwrite');
+        tx.objectStore('progress').delete('current');
+    }).catch(() => {});
+}
+
+// Adjust detection options for low-end devices
+function adjustDetectionForDevice() {
+    try {
+        const mem = navigator.deviceMemory || 4;
+        const cores = navigator.hardwareConcurrency || 4;
+        if (mem <= 2 || cores <= 2) {
+            face_detector_options_setup.inputSize = 96;
+            // Increase threshold slightly for performance
+            face_detector_options_setup.scoreThreshold = Math.max(face_detector_options_setup.scoreThreshold || 0.5, 0.5);
+        }
+    } catch (err) {
+        console.warn('Device capability detection failed', err);
+    }
+}
+
 // Similarity filtering settings for registration
-var registrationSimilarityThreshold = 0.10; // minimum Euclidean distance to accept new capture
+var registrationSimilarityThreshold = 0.15; // minimum Euclidean distance to accept new capture
 var maxRegistrationAttempts = 20;            // maximum attempts per descriptor slot
 var currentRegistrationAttempt = 0;          // attempt counter for current slot
 var bestCandidateDescriptor = null;          // best diverse descriptor seen so far
 var bestCandidateMinDist = 0;                // its distance
+// Track descriptor distances for calibration insight
+var registrationAttemptDistances = [];
 
 // Add helper functions for improved registration checks and feedback
 const duplicateThreshold = 0.3; // threshold for duplicate across users; local-only
-const consistencyThreshold = 0.6; // max allowed distance from previous captures
+const consistencyThreshold = 0.3; // max allowed distance from previous captures
 
 function showMessage(type, message) {
     const msgEl = document.getElementById('registrationMessage');
     if (msgEl) {
         msgEl.innerText = message;
         msgEl.style.color = type === 'error' ? 'red' : 'green';
+        msgEl.style.display = message ? 'inline-block' : 'none';
+        if (msgEl._hideTimer) {
+            clearTimeout(msgEl._hideTimer);
+        }
+        if (message) {
+            msgEl._hideTimer = setTimeout(() => {
+                msgEl.innerText = '';
+                msgEl.style.display = 'none';
+            }, 5000);
+        }
     }
+}
+
+function playBeep(){
+    try{
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = 880;
+        osc.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.1);
+    }catch(e){
+        console.warn('audio feedback not supported');
+    }
+}
+
+function updateProgress() {
+    const el = document.getElementById('progressText');
+    if (el) {
+        el.innerText = `${currentUserDescriptors.length}/${maxCaptures} captures`;
+    }
+    const fill = document.getElementById('progressFill');
+    if (fill) {
+        const pct = Math.min(100, (currentUserDescriptors.length / maxCaptures) * 100);
+        fill.style.width = pct + '%';
+    }
+    const show = currentUserDescriptors.length > 0;
+    const retake = document.getElementById('retakeBtn');
+    const restart = document.getElementById('restartBtn');
+    if (retake) retake.style.display = show ? 'inline-block' : 'none';
+    if (restart) restart.style.display = show ? 'inline-block' : 'none';
+}
+
+function addCapturePreview(dataUrl) {
+    if (!dataUrl) return;
+    const preview = document.getElementById('capturePreview');
+    if (!preview) return;
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.className = 'capture-thumb';
+    preview.appendChild(img);
+    requestAnimationFrame(() => img.classList.add('show'));
+}
+
+function retakeLastCapture() {
+    if (currentUserDescriptors.length === 0) return;
+    currentUserDescriptors.pop();
+    capturedFrames.pop();
+    const preview = document.getElementById('capturePreview');
+    if (preview && preview.lastChild) preview.removeChild(preview.lastChild);
+    updateProgress();
+    saveProgress();
+}
+
+function restartRegistration() {
+    currentUserDescriptors = [];
+    capturedFrames = [];
+    const preview = document.getElementById('capturePreview');
+    if (preview) preview.innerHTML = '';
+    registrationStartTime = null;
+    registrationCompleted = false;
+    faceapi_action = 'register';
+    updateProgress();
+    clearProgress();
+    camera_start();
+}
+
+function cancelRegistration() {
+    camera_stop();
+    faceapi_action = null;
+    registrationCompleted = true;
+    clearProgress();
 }
 
 function isConsistentWithCurrentUser(descriptor) {
@@ -86,8 +242,10 @@ function isConsistentWithCurrentUser(descriptor) {
 }
 
 function isDuplicateAcrossUsers(descriptor) {
-    // Implement backend check if needed; local-only returns false
-    return false;
+    if (!descriptor || flatRegisteredDescriptors.length === 0) return false;
+    return flatRegisteredDescriptors.some(ref =>
+        faceapi.euclideanDistance(descriptor, ref) < duplicateThreshold
+    );
 }
 
 // Check if descriptor matches current user's existing captures
@@ -95,6 +253,40 @@ function isRecognizedAsCurrentUser(descriptor) {
     return currentUserDescriptors.some(refDesc =>
         faceapi.euclideanDistance(descriptor, refDesc) < consistencyThreshold
     );
+}
+
+function isCaptureQualityHigh(detection) {
+    if (!detection || !detection.detection) return false;
+    const score = detection.detection._score || 0;
+    const box = detection.alignedRect && detection.alignedRect._box;
+    if (!box) return false;
+    const video = document.getElementById(videoId);
+    const minArea = (video.videoWidth * video.videoHeight) * 0.05; // at least 5% of frame
+    const area = box._width * box._height;
+    return score >= 0.5 && area >= minArea;
+}
+
+function computeMeanDescriptor(descriptors) {
+    if (!descriptors || descriptors.length === 0) return null;
+    const len = descriptors[0].length;
+    const mean = new Float32Array(len);
+    descriptors.forEach(desc => {
+        for (let i = 0; i < len; i++) {
+            mean[i] += desc[i];
+        }
+    });
+    for (let i = 0; i < len; i++) {
+        mean[i] /= descriptors.length;
+    }
+    return mean;
+}
+
+function logCalibrationSummary() {
+    if (registrationAttemptDistances.length === 0) return;
+    const sum = registrationAttemptDistances.reduce((a, b) => a + b, 0);
+    const avg = sum / registrationAttemptDistances.length;
+    console.log('Average registration distance:', avg.toFixed(3));
+    registrationAttemptDistances = [];
 }
 
 // Draw bounding box and label for registration/recognition overlay
@@ -123,14 +315,23 @@ function drawRegistrationOverlay(detection) {
 }
 
 async function camera_start() {
-	var video = document.getElementById(videoId);
-	try {
-		var stream = await navigator.mediaDevices.getUserMedia({ video: true });
-		video.srcObject = stream;
-	} catch (error) {
-		console.error('Error accessing webcam:', error);
-		alert('Unable to access camera. Please check permissions. ' + error.name + ': ' + error.message);
-	}
+        var video = document.getElementById(videoId);
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                console.error('getUserMedia not supported');
+                if (typeof showPermissionOverlay === 'function') showPermissionOverlay();
+                showMessage('error', 'Camera not supported in this browser.');
+                return;
+        }
+        try {
+                var stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                const overlay = document.getElementById('permissionOverlay');
+                if (overlay) overlay.style.display = 'none';
+        } catch (error) {
+                console.error('Error accessing webcam:', error);
+                if (typeof showPermissionOverlay === 'function') showPermissionOverlay();
+                showMessage('error', 'Unable to access camera: ' + error.message);
+        }
 }
 
 async function camera_stop() {
@@ -170,7 +371,7 @@ async function handleJsonFileInput(event) {
         }
     }
     if (errorFiles.length > 0) {
-        showMessage('error', 'Failed to load: ' + errorFiles.join(', '));
+        showMessage('error', 'Failed to load: ' + errorFiles.join(', ') + '. Check the file format and try again.');
     }
     if (allUsers.length > 0) {
         await load_face_descriptor_json(JSON.stringify(allUsers), true);
@@ -212,7 +413,7 @@ async function load_face_descriptor_json(warmupFaceDescriptorJson, merge = false
         camera_start();
         video_face_detection();
     } catch (error) {
-        showMessage('error', 'Error loading face descriptors: ' + error.message);
+        showMessage('error', 'Error loading face descriptors: ' + error.message + '. Please verify the JSON structure.');
     }
 }
 
@@ -279,39 +480,45 @@ async function unregisterAllServiceWorker() {
  * @param {string} canvasId - ID of the canvas to draw the snapshot on.
  */
 async function drawImageDataToCanvas(detections, canvasId) {
-    var canvas = document.getElementById(canvasId);
-    var context = canvas.getContext("2d");
+    const canvas = document.getElementById(canvasId);
+    const context = canvas.getContext("2d");
 
-    // Check if detections have faces
-    if (Array.isArray(detections) && detections.length > 0) {
-        const imageData = detections[1][0]; // Assuming imageData is part of detections
-		var confidence = 0;
-		
-		if (detections.length > 0 && detections[0].length > 0) {
-			if(detections[0][0].detection._score !== "undefined"){
-				confidence = detections[0][0].detection._score;
-			}
-			if(confidence != 0){
-				confidence = confidence * 100;
-			}
-		}
-		console.log(confidence);
-
-        // Set canvas dimensions to match the imageData
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-
-        // Draw the first ImageData onto the canvas at position (0, 0)
-        context.putImageData(imageData, 0, 0);
-		
-		// Display confidence percentage
-        context.font = '20px Arial';
-        context.fillStyle = 'white'; // Color for text
-        context.fillText(`Confidence: ${confidence.toFixed(2)}%`, 10, 30); // Fixed to 2 decimal places
-
-    } else {
+    // Expect [results, imageDataArray]; guard against invalid shapes
+    if (!Array.isArray(detections) || detections.length < 2) {
         console.log('No image data to draw');
+        return;
     }
+
+    const results = detections[0];
+    const images = detections[1];
+
+    if (!Array.isArray(images) || images.length === 0) {
+        console.log('No image data to draw');
+        return;
+    }
+
+    const imageData = images[0];
+
+    // Determine confidence if available
+    let confidence = 0;
+    if (Array.isArray(results) && results.length > 0 && results[0] && results[0].detection) {
+        const score = results[0].detection._score;
+        if (typeof score === 'number') {
+            confidence = score * 100;
+        }
+    }
+
+    // Set canvas dimensions to match the imageData
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+
+    // Draw the ImageData onto the canvas
+    context.putImageData(imageData, 0, 0);
+
+    // Display confidence percentage
+    context.font = '20px Arial';
+    context.fillStyle = 'white';
+    context.fillText(`Confidence: ${confidence.toFixed(2)}%`, 10, 30);
 }
 
 /* Overlay Canvas Elements:
@@ -421,6 +628,8 @@ var registrationCompleted = false;
 var verificationCompleted = false;
 var registrationStartTime = null;
 var registrationTimeout = 1 * 60 * 1000; // 1 minute
+var capturedFrames = [];
+var lastFaceImageData = null;
 
 function faceapi_register(descriptor) {
     if (!descriptor || registrationCompleted) {
@@ -439,6 +648,8 @@ function faceapi_register(descriptor) {
         // Compute minimum distance to existing descriptors
         const distances = currentUserDescriptors.map(d => faceapi.euclideanDistance(descriptor, d));
         const minDist = Math.min(...distances);
+        registrationAttemptDistances.push(minDist);
+        console.log('Registration distance:', minDist.toFixed(3));
         // Update best candidate if more distinct
         currentRegistrationAttempt++;
         if (minDist > bestCandidateMinDist) {
@@ -456,6 +667,17 @@ function faceapi_register(descriptor) {
     }
     if (accept) {
         currentUserDescriptors.push(descriptor);
+        if (lastFaceImageData) {
+            const cv = document.createElement('canvas');
+            cv.width = lastFaceImageData.width;
+            cv.height = lastFaceImageData.height;
+            cv.getContext('2d').putImageData(lastFaceImageData, 0, 0);
+            const url = cv.toDataURL();
+            capturedFrames.push(url);
+            addCapturePreview(url);
+        }
+        updateProgress();
+        saveProgress();
         // Reset attempt tracking
         currentRegistrationAttempt = 0;
         bestCandidateDescriptor = null;
@@ -466,12 +688,16 @@ function faceapi_register(descriptor) {
             registrationCompleted = true;
             faceapi_action = null;
             camera_stop();
-            // Build one entry per captured descriptor
-            const downloadData = currentUserDescriptors.map(desc => ({
+            clearProgress();
+            const meanDescriptor = computeMeanDescriptor(currentUserDescriptors);
+            const downloadData = [{
                 id: currentUserId,
                 name: currentUserName,
-                descriptors: [ Array.from(desc) ]
-            }));
+                descriptors: [
+                    ...currentUserDescriptors.map(d => Array.from(d)),
+                    Array.from(meanDescriptor)
+                ]
+            }];
             // Trigger download of per-capture JSON
             const jsonData = JSON.stringify(downloadData, null, 2);
             const blob = new Blob([jsonData], { type: 'application/json' });
@@ -491,8 +717,14 @@ function faceapi_register(descriptor) {
                 });
             });
             registeredDescriptors = flatRegisteredDescriptors;
+            logCalibrationSummary();
             // Reset for next registration if needed
             currentUserDescriptors = [];
+            capturedFrames = [];
+            lastFaceImageData = null;
+            const preview = document.getElementById('capturePreview');
+            if (preview) preview.innerHTML = '';
+            updateProgress();
         }
     }
 }
@@ -557,7 +789,9 @@ async function initWorkerAddEventListener() {
 			console.log(event.data.data.detections);
 			
 			
-			const dets = event.data.data.detections[0];
+                        const dets = event.data.data.detections[0];
+                        lastFaceImageData = event.data.data.detections[1] && event.data.data.detections[1][0];
+                        drawImageDataToCanvas(event.data.data.detections, canvasOutputId);
 			if (Array.isArray(dets) && dets.length > 0) {
 				if (faceapi_action === "verify") {
 					if (multiple_face_detection_yn === "y") {
@@ -571,28 +805,33 @@ async function initWorkerAddEventListener() {
 						registrationStartTime = Date.now();
 					}
 					if (Date.now() - registrationStartTime > registrationTimeout) {
-						showMessage('error', 'Registration timed out. Please try again.');
+                                                showMessage('error', 'Registration timed out. Ensure you are well lit and try again.');
 						faceapi_action = null;
 						camera_stop();
 						registrationCompleted = true;
-					} else if (dets.length !== 1) {
-						showMessage('error', 'Please ensure only one face is visible for registration.');
-					} else {
-						const descriptor = dets[0].descriptor;
-						// Check for duplicates across existing users
-						if (isDuplicateAcrossUsers(descriptor)) {
-							showMessage('error', 'This face is already registered.');
-						} else if (!isConsistentWithCurrentUser(descriptor)) {
-							showMessage('error', 'Face too different from previous captures.');
-						} else {
-							showMessage('success', 'Face capture accepted.');
-							faceapi_register(descriptor);
-						}
-					}
+                                        } else if (dets.length !== 1) {
+                                                showMessage('error', 'Multiple faces detected. Please ensure only your face is visible.');
+                                        } else {
+                                                const descriptor = dets[0].descriptor;
+                                                if (!isCaptureQualityHigh(dets[0])) {
+                                                        showMessage('error', 'Low-quality capture. Ensure good lighting and face the camera.');
+                                                } else if (isDuplicateAcrossUsers(descriptor)) {
+                                                        showMessage('error', 'This face appears already registered. Restart if this is incorrect.');
+                                                } else if (!isConsistentWithCurrentUser(descriptor)) {
+                                                        showMessage('error', 'Face differs from previous captures. Hold still and keep lighting consistent.');
+                                                } else {
+                                                        showMessage('success', 'Face capture accepted.');
+                                                        if(navigator.vibrate){ navigator.vibrate(100); }
+                                                        playBeep();
+                                                        faceapi_register(descriptor);
+                                                }
+                                        }
 				} else {
 					console.log("faceapi_action is NULL");
 				}
-			}
+                        } else {
+                                showMessage("error", "No face detected. Make sure your face is fully visible and well lit.");
+                        }
 			
 			if (typeof vle_face_landmark_position_yn === "string" && vle_face_landmark_position_yn == "y") {
 				if (Array.isArray(dets) && dets.length > 0 && dets[0]) {
@@ -800,6 +1039,9 @@ async function startInMainThread() {
 
 // Initialize either service worker or fallback on main thread
 document.addEventListener("DOMContentLoaded", async function(event) {
+    clearProgress();
+    loadProgress();
+    adjustDetectionForDevice();
     console.log("DOMContentLoaded - checking Service Worker support");
     const canUseWorker = 'serviceWorker' in navigator && typeof OffscreenCanvas !== 'undefined';
     if (canUseWorker) {
@@ -813,6 +1055,13 @@ document.addEventListener("DOMContentLoaded", async function(event) {
         console.warn("Service Worker or OffscreenCanvas not available; using main thread");
         await startInMainThread();
     }
+    updateProgress();
+    const retake = document.getElementById('retakeBtn');
+    const restart = document.getElementById('restartBtn');
+    const cancel = document.getElementById('cancelBtn');
+    if (retake) retake.addEventListener('click', retakeLastCapture);
+    if (restart) restart.addEventListener('click', restartRegistration);
+    if (cancel) cancel.addEventListener('click', cancelRegistration);
 });
 
 // Add multi-face drawing utilities
